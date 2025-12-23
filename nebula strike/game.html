@@ -1,0 +1,512 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Nebula Strike — PNG Uzay Shooter</title>
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, "Helvetica Neue", Arial;
+      background: #0a0d16;
+      color: #e6e8ef;
+      display: grid;
+      place-items: center;
+      min-height: 100vh;
+    }
+    .wrap { width: min(880px, 94vw); display: grid; gap: 10px; }
+    header { display: flex; align-items: center; justify-content: space-between; }
+    h1 { font-size: 1.3rem; margin: 8px 0; letter-spacing: 0.4px; }
+    .hud { display: grid; grid-template-columns: 1fr auto auto; gap: 10px; align-items: center; }
+    .pill {
+      background: rgba(255,255,255,0.06);
+      border: 1px solid rgba(255,255,255,0.14);
+      border-radius: 10px;
+      padding: 8px 10px;
+      display: inline-flex; gap: 10px; align-items: center;
+    }
+    .btn, select {
+      border: 1px solid #4a55aa;
+      background: linear-gradient(180deg,#303a91,#282f7a);
+      color: #fff;
+      padding: 8px 12px;
+      border-radius: 8px;
+      cursor: pointer;
+      box-shadow: 0 6px 16px rgba(0,0,0,0.35), inset 0 0 12px rgba(255,255,255,0.06);
+    }
+    .legend { opacity: 0.85; font-size: 0.92rem; }
+    canvas {
+      width: 860px; height: 540px;
+      border-radius: 12px;
+      border: 1px solid rgba(255,255,255,0.12);
+      box-shadow: 0 18px 50px rgba(0,0,0,0.55);
+      background: radial-gradient(1200px 600px at 50% 50%, #0b1130 0%, #0a0d16 60%, #090c13 100%);
+      display: block;
+      margin: 0 auto;
+    }
+    @media (max-width: 900px) { canvas { width: 94vw; height: calc(94vw * 0.628); } }
+    .note { font-size: 0.9rem; opacity: 0.8; text-align: center; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>Nebula Strike — PNG Uzay Gemisi Shooter</h1>
+      <div class="pill legend">Kontroller: WASD / Ok tuşları — Hareket | Space — Ateş | Shift — Hızlı hareket</div>
+    </header>
+    <div class="hud">
+      <div class="pill">
+        <div>Skor: <strong id="score">0</strong></div>
+        <div>Can: <strong id="hp">100</strong></div>
+        <div>Seviye: <strong id="level">1</strong></div>
+        <div>Silah: <strong id="weapon">Blaster</strong></div>
+      </div>
+      <div class="pill">
+        Zorluk:
+        <select id="difficulty">
+          <option value="easy">Kolay</option>
+          <option value="normal" selected>Orta</option>
+          <option value="hard">Zor</option>
+          <option value="insane">Çılgın</option>
+        </select>
+      </div>
+      <button class="btn" id="startBtn">Başlat / Yeniden Başlat</button>
+    </div>
+    <canvas id="game" width="860" height="540"></canvas>
+    <p class="note">Not: Bu oyun beta aşamasındadır, keşfettiğiniz hata olursa iletişime geçebilir veya kendiniz düzeltebilirsiniz</p>
+  </div>
+
+  <script>
+    const canvas = document.getElementById("game");
+    const ctx = canvas.getContext("2d");
+    const scoreEl = document.getElementById("score");
+    const hpEl = document.getElementById("hp");
+    const levelEl = document.getElementById("level");
+    const weaponEl = document.getElementById("weapon");
+    const startBtn = document.getElementById("startBtn");
+    const difficultySel = document.getElementById("difficulty");
+    const W = () => canvas.width, H = () => canvas.height;
+
+    // PNG gemi — preload
+    const shipImg = new Image();
+    shipImg.src = "images/ship.png"; // Burayı kendi yoluna göre düzenle
+    let shipReady = false;
+    shipImg.onload = () => { shipReady = true; draw(); };
+    shipImg.onerror = () => { console.warn("ship.png yüklenemedi. Yol doğru mu?"); draw(); };
+
+    // Durum
+    let running = false, score = 0, hp = 100, level = 1;
+    let last = 0, spawnTimer = 0, levelTimer = 0, bossTimer = 0;
+    let difficulty = "normal";
+
+    // Ayarlar
+    const DIFF = {
+      easy:   { enemyRate: 0.95, enemySpeed: 160, dmgTaken: 10, playerSpeed: 260 },
+      normal: { enemyRate: 0.75, enemySpeed: 190, dmgTaken: 12, playerSpeed: 280 },
+      hard:   { enemyRate: 0.55, enemySpeed: 220, dmgTaken: 14, playerSpeed: 300 },
+      insane: { enemyRate: 0.40, enemySpeed: 260, dmgTaken: 18, playerSpeed: 320 }
+    };
+
+    // Girdi
+    const keys = new Set();
+    window.addEventListener("keydown", e => {
+      keys.add(e.code);
+      if (e.code === "Space") e.preventDefault();
+      if (!running && e.code === "Space") start();
+    });
+    window.addEventListener("keyup", e => keys.delete(e.code));
+
+    // Parallax yıldız alanı
+    const starLayers = [
+      { count: 80, speed: 8, color: "rgba(255,255,255,0.8)", size: [1,2], stars: [] },
+      { count: 70, speed: 18, color: "rgba(160,190,255,0.9)", size: [1,2], stars: [] },
+      { count: 50, speed: 40, color: "rgba(120,160,255,0.6)", size: [1,2], stars: [] }
+    ];
+    function initStars() {
+      starLayers.forEach(layer => {
+        layer.stars = [...Array(layer.count)].map(()=>({
+          x: Math.random()*W(), y: Math.random()*H(), s: layer.size[0] + Math.random()*(layer.size[1]-layer.size[0])
+        }));
+      });
+    }
+
+    // Oyuncu gemisi — PNG boyutları ve hitbox
+    const player = {
+      x: W()/2, y: H()-110,
+      w: 80, h: 80,     // PNG için görünür boyut (gerekirse ayarla)
+      hitW: 44, hitH: 54, // çarpışma kutusu (gövde merkezine yakın)
+      vx: 0, vy: 0,
+      baseSpeed: DIFF[difficulty].playerSpeed,
+      boost: 1.6,
+      fireRate: 0.12, fireTimer: 0,
+      weapon: "Blaster"
+    };
+
+    // Çizim yardımcıları
+    function glowRect(x,y,w,h,color,blur=20){ ctx.save(); ctx.shadowColor=color; ctx.shadowBlur=blur; ctx.fillStyle=color; ctx.fillRect(x,y,w,h); ctx.restore(); }
+    function radGrad(x,y,r,c0,c1){ const g=ctx.createRadialGradient(x,y,0,x,y,r); g.addColorStop(0,c0); g.addColorStop(1,c1); return g; }
+    function linearGrad(x0,y0,x1,y1,stops){ const g=ctx.createLinearGradient(x0,y0,x1,y1); stops.forEach(s=>g.addColorStop(s.at,s.color)); return g; }
+
+    // Oyuncu gemisini PNG ile çiz
+    function drawShip(x,y){
+      if (shipReady) {
+        ctx.drawImage(shipImg, x - player.w/2, y - player.h/2, player.w, player.h);
+      } else {
+        // Fallback: basit bir placeholder (PNG yüklenmezse)
+        ctx.save();
+        ctx.fillStyle = "#2e3a8f";
+        ctx.beginPath();
+        ctx.moveTo(x, y-24); ctx.lineTo(x+18,y+16); ctx.lineTo(x-18,y+16); ctx.closePath(); ctx.fill();
+        ctx.restore();
+      }
+      // Motor parıltısı (PNG altında hafif glow)
+      glowRect(x-8, y + player.h/2 - 10, 16, 6, "rgba(80,180,255,0.45)", 16);
+    }
+
+    // Mermiler ve efektler
+    const bullets = [];
+    function fire(){
+      const nowRate = player.fireRate;
+      if (player.fireTimer <= 0) {
+        const spread = player.weapon==="Twin" ? [-8,8] : [0];
+        spread.forEach(dx=>{
+          bullets.push({ x: player.x+dx, y: player.y-26, vx: 0, vy: -560, r: 3.4, color: "rgba(120,220,255,0.9)", t: 0 });
+        });
+        player.fireTimer = nowRate;
+      }
+    }
+
+    // Düşmanlar
+    const enemies = [];
+    function spawnEnemy(){
+      const type = Math.random() < 0.8 ? "fighter" : "orb";
+      if (type === "fighter") {
+        const x = 60 + Math.random()*(W()-120);
+        enemies.push({ type, x, y: -40, hp: 20, speed: DIFF[difficulty].enemySpeed, w: 28, h: 28, t: 0 });
+      } else {
+        const x = 80 + Math.random()*(W()-160);
+        enemies.push({ type, x, y: -60, hp: 30, speed: DIFF[difficulty].enemySpeed*0.85, r: 16, t: 0 });
+      }
+    }
+
+    // Düşman çizimleri (vektör; PNG sadece oyuncuda)
+    function drawEnemy(e){
+      ctx.save(); ctx.translate(e.x, e.y);
+      if (e.type==="fighter"){
+        ctx.beginPath(); ctx.moveTo(0,-14); ctx.lineTo(16,0); ctx.lineTo(0,14); ctx.lineTo(-16,0); ctx.closePath();
+        ctx.fillStyle = linearGrad(-16,-14,16,14,[{at:0,color:"#6a142c"},{at:1,color:"#2a0915"}]);
+        ctx.shadowColor = "rgba(255,60,120,0.8)"; ctx.shadowBlur = 12; ctx.fill();
+        glowRect(-4,-4,8,8,"rgba(255,90,150,0.5)",16);
+      } else {
+        const g = radGrad(0,0,22,"rgba(255,220,120,0.9)","rgba(255,140,60,0.05)");
+        ctx.fillStyle = g; ctx.beginPath(); ctx.arc(0,0, e.r, 0, Math.PI*2); ctx.fill();
+        ctx.shadowColor = "rgba(255,190,100,0.7)"; ctx.shadowBlur = 18;
+      }
+      ctx.restore();
+    }
+
+    // Parçacıklar
+    const particles = [];
+    function spawnExplosion(x,y,color,count=26,power=220){
+      for(let i=0;i<count;i++){
+        const a = Math.random()*Math.PI*2;
+        const s = 40 + Math.random()*power;
+        particles.push({ x, y, vx: Math.cos(a)*s*0.6, vy: Math.sin(a)*s*0.6, life: 0.8 + Math.random()*0.5, color });
+      }
+    }
+
+    // Çarpışma
+    function hitCircleRect(cx,cy,r,rx,ry,rw,rh){
+      const closestX = Math.max(rx, Math.min(cx, rx+rw));
+      const closestY = Math.max(ry, Math.min(cy, ry+rh));
+      const dx = cx - closestX, dy = cy - closestY;
+      return dx*dx + dy*dy < r*r;
+    }
+    function hitRect(ax,ay,aw,ah,bx,by,bw,bh){
+      return ax < bx + bw && ax + aw > bx && ay < by + bh && ay + ah > by;
+    }
+
+    // Güçlendirmeler
+    const powerups = [];
+    function spawnPowerup(x,y){
+      const types = ["Twin","Repair","Pulse"];
+      const type = types[Math.floor(Math.random()*types.length)];
+      powerups.push({ type, x, y, vy: 80, r: 10, t: 0 });
+    }
+    function drawPowerup(p){
+      ctx.save(); ctx.translate(p.x,p.y);
+      let c0,c1;
+      if (p.type==="Twin"){ c0="#8cf2ff"; c1="rgba(80,180,255,0.1)"; }
+      else if (p.type==="Repair"){ c0="#61ff9b"; c1="rgba(100,255,160,0.1)"; }
+      else { c0="#ffc654"; c1="rgba(255,170,80,0.1)"; }
+      ctx.fillStyle = radGrad(0,0,14,c0,c1);
+      ctx.beginPath(); ctx.arc(0,0,p.r,0,Math.PI*2); ctx.fill();
+      ctx.restore();
+    }
+
+    // Boss
+    let boss = null;
+    function spawnBoss(){ boss = { x: W()/2, y: -120, w: 160, h: 80, hp: 600, t: 0, phase: 0 }; }
+    function drawBoss(b){
+      ctx.save(); ctx.translate(b.x,b.y);
+      ctx.beginPath();
+      ctx.moveTo(-80,-10); ctx.quadraticCurveTo(0,-40,80,-10);
+      ctx.quadraticCurveTo(60,40,-60,40);
+      ctx.quadraticCurveTo(-80,-10,-80,-10);
+      ctx.closePath();
+      ctx.fillStyle = linearGrad(-80,-40,80,40,[{at:0,color:"#1e2a2e"},{at:0.5,color:"#374b52"},{at:1,color:"#151c1f"}]);
+      ctx.shadowColor = "rgba(120,255,220,0.6)"; ctx.shadowBlur = 24; ctx.fill();
+      const g = radGrad(0,0,26,"rgba(120,255,220,0.9)","rgba(40,140,120,0.08)");
+      ctx.fillStyle = g; ctx.beginPath(); ctx.arc(0,10,20,0,Math.PI*2); ctx.fill();
+      glowRect(-90,-18,180,6,"rgba(120,255,220,0.25)",22);
+      ctx.restore();
+    }
+
+    // Başlat
+    function start(){
+      difficulty = difficultySel.value;
+      running = true; score = 0; hp = 100; level = 1;
+      last = performance.now(); spawnTimer = 0; levelTimer = 0; bossTimer = 0;
+      enemies.length = 0; bullets.length = 0; particles.length = 0; powerups.length = 0; boss = null;
+      player.x = W()/2; player.y = H()-110; player.vx=0; player.vy=0; player.fireTimer=0; player.weapon="Blaster";
+      player.baseSpeed = DIFF[difficulty].playerSpeed;
+      initStars();
+      requestAnimationFrame(loop);
+    }
+    startBtn.addEventListener("click", ()=> start());
+
+    // Oyun döngüsü
+    function loop(now){
+      const dt = Math.min(0.033, (now - last)/1000);
+      last = now;
+      update(dt);
+      draw();
+      if (running) requestAnimationFrame(loop);
+    }
+
+    // Mantık
+    function update(dt){
+      // Yıldızlar
+      starLayers.forEach(layer=>{
+        layer.stars.forEach(s => {
+          s.y += layer.speed * dt;
+          if (s.y > H()) { s.y = -2; s.x = Math.random()*W(); }
+        });
+      });
+
+      // Girdi
+      const left = keys.has("ArrowLeft") || keys.has("KeyA");
+      const right = keys.has("ArrowRight") || keys.has("KeyD");
+      const up = keys.has("ArrowUp") || keys.has("KeyW");
+      const down = keys.has("ArrowDown") || keys.has("KeyS");
+      const boost = keys.has("ShiftLeft") || keys.has("ShiftRight");
+      let spd = player.baseSpeed * (boost ? player.boost : 1);
+      player.vx = (right - left) * spd;
+      player.vy = (down - up) * spd * 0.9;
+      player.x += player.vx * dt;
+      player.y += player.vy * dt;
+      player.x = Math.max(40, Math.min(W()-40, player.x));
+      player.y = Math.max(60, Math.min(H()-40, player.y));
+
+      // Ateş
+      player.fireTimer -= dt;
+      if (keys.has("Space")) fire();
+
+      // Düşman doğurma ve seviye
+      spawnTimer += dt; levelTimer += dt; bossTimer += dt;
+      if (!boss && spawnTimer >= DIFF[difficulty].enemyRate) {
+        spawnTimer = 0;
+        const n = 1 + Math.floor(level/3);
+        for (let i=0;i<n;i++) spawnEnemy();
+      }
+      if (levelTimer >= 8) { levelTimer = 0; level++; score += 10; }
+      if (!boss && bossTimer >= 22 + level*2) { spawnBoss(); bossTimer = 0; }
+      if (boss){ boss.t += dt; boss.y += 40 * dt; if (boss.y > 140) boss.y = 140; boss.x += Math.sin(boss.t*1.2) * 90 * dt; }
+
+      // Mermiler
+      for (let i=bullets.length-1;i>=0;i--){
+        const b = bullets[i];
+        b.t += dt; b.y += b.vy * dt; b.x += b.vx * dt;
+        if (b.y < -40) bullets.splice(i,1);
+      }
+
+      // Düşman hareket ve çarpışma
+      for (let i=enemies.length-1;i>=0;i--){
+        const e = enemies[i];
+        e.t += dt;
+        const sway = Math.sin(e.t*2.4) * 60;
+        e.y += DIFF[difficulty].enemySpeed * dt * (e.type==="fighter" ? 1.0 : 0.9);
+        e.x += sway * dt;
+
+        // Oyuncu çarpışması (PNG hitbox)
+        const px = player.x - player.hitW/2, py = player.y - player.hitH/2;
+        const pw = player.hitW, ph = player.hitH;
+
+        if (e.type==="fighter"){
+          if (hitRect(px, py, pw, ph, e.x-14, e.y-14, 28, 28)) {
+            hp -= DIFF[difficulty].dmgTaken; spawnExplosion(e.x,e.y,"rgba(255,80,140,0.8)");
+            enemies.splice(i,1);
+          }
+        } else {
+          if (hitCircleRect(e.x,e.y, e.r, px, py, pw, ph)) {
+            hp -= DIFF[difficulty].dmgTaken; spawnExplosion(e.x,e.y,"rgba(255,190,100,0.8)");
+            enemies.splice(i,1);
+          }
+        }
+
+        // Mermi çarpışmaları
+        for (let j=bullets.length-1;j>=0;j--){
+          const b = bullets[j];
+          let hit = false;
+          if (e.type==="fighter") {
+            hit = hitRect(b.x-b.r, b.y-b.r, b.r*2, b.r*2, e.x-14, e.y-14, 28, 28);
+          } else {
+            hit = hitCircleRect(e.x,e.y,e.r, b.x-b.r, b.y-b.r, b.r*2, b.r*2);
+          }
+          if (hit){
+            e.hp -= (player.weapon==="Pulse"? 18 : 12);
+            bullets.splice(j,1);
+            glowRect(b.x-2,b.y-2,4,4,"rgba(140,220,255,0.8)",10);
+            if (e.hp <= 0){
+              score += e.type==="fighter" ? 6 : 8;
+              spawnExplosion(e.x,e.y, e.type==="fighter" ? "rgba(255,80,140,0.9)" : "rgba(255,190,100,0.9)", 28, 260);
+              enemies.splice(i,1);
+              if (Math.random()<0.18) spawnPowerup(e.x, e.y);
+            }
+          }
+        }
+        if (e.y > H()+60) enemies.splice(i,1);
+      }
+
+      // Boss çarpışmaları
+      if (boss){
+        const px = player.x - player.hitW/2, py = player.y - player.hitH/2;
+        const pw = player.hitW, ph = player.hitH;
+        if (hitRect(px, py, pw, ph, boss.x-80, boss.y-40, boss.w, boss.h)) {
+          hp -= DIFF[difficulty].dmgTaken + 6;
+        }
+        for (let j=bullets.length-1;j>=0;j--){
+          const b = bullets[j];
+          if (hitRect(b.x-b.r,b.y-b.r,b.r*2,b.r*2, boss.x-80,boss.y-40,boss.w,boss.h)) {
+            bullets.splice(j,1);
+            boss.hp -= (player.weapon==="Pulse"? 16 : 10);
+            glowRect(boss.x-4,boss.y-4,8,8,"rgba(120,255,220,0.6)",16);
+            if (boss.hp <= 0){
+              score += 80;
+              spawnExplosion(boss.x,boss.y,"rgba(120,255,220,0.85)", 50, 500);
+              boss = null;
+              spawnPowerup(Math.max(60, Math.min(W()-60, player.x)), 140); // Garanti drop
+            }
+          }
+        }
+      }
+
+      // Powerup hareket + toplama
+      for (let i=powerups.length-1;i>=0;i--){
+        const p = powerups[i];
+        p.t += dt; p.y += p.vy * dt;
+        const px = player.x - player.hitW/2, py = player.y - player.hitH/2;
+        if (hitCircleRect(p.x,p.y,p.r, px, py, player.hitW, player.hitH)){
+          if (p.type==="Twin"){ player.weapon="Twin"; player.fireRate=0.11; }
+          else if (p.type==="Repair"){ hp = Math.min(100, hp + 20); }
+          else if (p.type==="Pulse"){ player.weapon="Pulse"; player.fireRate=0.14; }
+          powerups.splice(i,1);
+        }
+        if (p.y > H()+40) powerups.splice(i,1);
+      }
+
+      // Parçacıklar
+      for (let i=particles.length-1;i>=0;i--){
+        const p = particles[i];
+        p.life -= dt; p.x += p.vx * dt; p.y += p.vy * dt;
+        if (p.life <= 0) particles.splice(i,1);
+      }
+
+      // Can bitti
+      if (hp <= 0) {
+        running = false;
+        spawnExplosion(player.x,player.y,"rgba(120,200,255,0.9)", 60, 420);
+      }
+
+      // HUD
+      scoreEl.textContent = Math.floor(score);
+      hpEl.textContent = Math.max(0, Math.floor(hp));
+      levelEl.textContent = level;
+      weaponEl.textContent = player.weapon;
+    }
+
+    // Çizim
+    function draw(){
+      // Arka plan nebula
+      const nebula = ctx.createRadialGradient(W()/2, H()/2, 20, W()/2, H()/2, 460);
+      nebula.addColorStop(0, "rgba(40,60,120,0.25)");
+      nebula.addColorStop(0.5, "rgba(20,40,90,0.15)");
+      nebula.addColorStop(1, "rgba(10,16,32,0.05)");
+      ctx.fillStyle = nebula;
+      ctx.fillRect(0,0,W(),H());
+
+      // Parallax yıldızlar
+      starLayers.forEach(layer=>{
+        ctx.fillStyle = layer.color;
+        layer.stars.forEach(s=>{ ctx.fillRect(s.x, s.y, s.s, s.s); });
+      });
+
+      // Oyuncu gemisi (PNG)
+      drawShip(player.x, player.y);
+
+      // Mermiler (parıltı)
+      bullets.forEach(b=>{
+        ctx.save();
+        ctx.beginPath(); ctx.arc(b.x,b.y,b.r,0,Math.PI*2);
+        ctx.fillStyle = radGrad(b.x,b.y,12,"rgba(120,220,255,0.95)","rgba(120,220,255,0.05)");
+        ctx.shadowColor = "rgba(120,220,255,0.7)"; ctx.shadowBlur = 16; ctx.fill();
+        ctx.restore();
+      });
+
+      // Düşmanlar ve boss
+      enemies.forEach(drawEnemy);
+      if (boss) drawBoss(boss);
+
+      // Poweruplar
+      powerups.forEach(drawPowerup);
+
+      // Parçacıklar
+      particles.forEach(p=>{
+        ctx.save();
+        ctx.globalCompositeOperation = "lighter";
+        ctx.fillStyle = p.color;
+        ctx.beginPath(); ctx.arc(p.x,p.y,2.6,0,Math.PI*2); ctx.fill();
+        ctx.restore();
+      });
+
+      // Oyun bitti overlay
+      if (!running && hp<=0){
+        ctx.save();
+        ctx.fillStyle = "rgba(0,0,0,0.55)";
+        ctx.fillRect(0,0,W(),H());
+        ctx.fillStyle = "#fff"; ctx.textAlign="center";
+        ctx.font = "bold 28px system-ui";
+        ctx.fillText("Oyun Bitti", W()/2, H()/2 - 20);
+        ctx.font = "16px system-ui";
+        ctx.fillText(`Skor: ${Math.floor(score)} — Başlat/Yeniden Başlat: buton`, W()/2, H()/2 + 14);
+        ctx.restore();
+      }
+
+      // PNG henüz hazır değilse uyarı
+      if (!shipReady) {
+        ctx.save();
+        ctx.fillStyle = "rgba(255,255,255,0.85)";
+        ctx.font = "14px system-ui";
+        ctx.fillText("Gemi görseli yükleniyor... (images/ship.png)", 16, H()-18);
+        ctx.restore();
+      }
+    }
+
+    // İlk çizim
+    initStars();
+    draw();
+  </script>
+</body>
+</html></html>
